@@ -25,8 +25,9 @@ import sys
 import tempfile
 
 from typing import Iterable, Set, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
+from os.path import exists
 
 import pandas as pd
 import pytz
@@ -83,6 +84,8 @@ def main() -> None:
     parse_args()
     configure_altair()
 
+    global df_stargazers
+    global df_forks
     df_stargazers = read_stars_over_time_from_csv()
     df_forks = read_forks_over_time_from_csv()
 
@@ -156,6 +159,117 @@ def main() -> None:
 
     gen_report_footer()
     finalize_and_render_report()
+    summarize_data()
+
+def summarize_data():
+    output_directory = "../summary"
+    log.info("Testing: %s", output_directory)
+    if os.path.exists(output_directory):
+        if not os.path.isdir(output_directory):
+            log.error(
+                "The specified output directory path does not point to a directory: %s",
+                output_directory,
+            )
+            sys.exit(1)
+    else:
+        log.info("Create output directory: %s", output_directory)
+        os.makedirs(output_directory)
+
+    csv_summary_filepath = os.path.join(output_directory, "summary.csv")
+    md_summary_filepath = os.path.join(output_directory, "summary.md")
+
+    data = [df_agg_clones["clones_total"].sum(), df_agg_clones["clones_unique"].sum(), df_agg_views["views_total"].sum(), df_agg_views["views_unique"].sum(), df_stargazers["stars_cumulative"].max(), df_forks["forks_cumulative"].max()]
+    columns = ['cum_clones_total','cum_clones_unique','cum_views_total','cum_views_unique','cum_stars','cum_forks']
+    columns_average = ['from','to','avg_clone_total','avg_clone_unique','avg_view_total','avg_view_unique','cum_stars','cum_forks']
+
+    if exists(csv_summary_filepath):
+        df_current = pd.read_csv(csv_summary_filepath, index_col=0)
+
+        if ARGS.repospec in df_current.index:
+            df_current.loc[ARGS.repospec] = data
+            df_current.to_csv(csv_summary_filepath)
+        else:
+            df_summary = pd.DataFrame([data], index=[ARGS.repospec], columns=columns)
+            df_summary.to_csv(csv_summary_filepath, mode='a', header=False)
+    else:
+        df_summary = pd.DataFrame([data], index=[ARGS.repospec], columns=columns)
+        df_summary.to_csv(csv_summary_filepath)
+
+    # delete from summary.md if exists
+    start = 0
+    if exists(md_summary_filepath):
+        with open(md_summary_filepath, "r") as f:
+            lines = f.readlines()
+            for i in range(len(lines)):
+                if start == 0:
+                    if lines[i].find(ARGS.repospec) != -1:
+                        start = i
+                else:
+                    if lines[i].find("ShimmerEngineering") != -1:
+                        del lines[start:i]
+                        break
+                        
+        with open(md_summary_filepath, "w") as f:
+            for x in lines:
+                f.write(x)
+                
+    MD_SUMMARY = StringIO()
+    MD_SUMMARY.write(
+        textwrap.dedent(
+            f"""
+
+    ## {ARGS.repospec}
+
+    |{columns[0]}|{columns[1]}|{columns[2]}|{columns[3]}|{columns[4]}|{columns[5]}|
+    | --- | --- | --- | --- | --- | --- |
+    |{data[0]}|{data[1]}|{data[2]}|{data[3]}|{data[4]}|{data[5]}|
+
+    |{columns_average[0]}|{columns_average[1]}|{columns_average[2]}|{columns_average[3]}|{columns_average[4]}|{columns_average[5]}|{columns_average[6]}|{columns_average[7]}|
+    | --- | --- | --- | --- | --- | --- | --- | --- |
+    """
+        ).rstrip()
+    )
+
+    #delta = df_agg_views["time"].iloc[len(df_agg_views.index) - 1] - df_agg_views["time"].iloc[0]
+    delta = datetime.today() - pd.to_datetime(df_agg_views["time"].iloc[0]).replace(tzinfo=None) 
+    temp = []
+    for x in df_agg_views["time"].values:
+        temp.append(pd.to_datetime(x).to_pydatetime().strftime("%Y-%m-%d"))
+    for i in range(delta.days + 1):
+        day = pd.to_datetime(df_agg_views["time"].iloc[0]) + timedelta(days=i)
+        if day.strftime("%Y-%m-%d") not in temp:
+            df_agg_views.loc[-1] = [day, 0, 0]
+            df_agg_clones.loc[-1] = [day, 0, 0]
+            df_agg_views.index = df_agg_views.index + 1
+            df_agg_clones.index = df_agg_clones.index + 1
+    df_new_agg_views = df_agg_views.sort_values(by='time',ascending=True)
+    df_new_agg_clones = df_agg_clones.sort_values(by='time',ascending=True)
+    
+    cum_forks = 0
+    cum_stars = 0
+    for x in range(0, len(df_new_agg_views), 7):
+        for y in range(0, len(df_forks)):
+            if df_new_agg_views["time"].iloc[x] + timedelta(days=7) >= df_forks.index.date[y]:
+                cum_forks = df_forks["forks_cumulative"].iloc[y]
+        for z in range(0, len(df_stargazers)):
+            if df_new_agg_views["time"].iloc[x] + timedelta(days=7) >= df_stargazers.index.date[z]:
+                cum_stars = df_stargazers["stars_cumulative"].iloc[z]
+        if x + 6 < len(df_new_agg_views):
+            start_date = df_new_agg_views["time"].iloc[x].strftime("%Y-%m-%d")
+            end_date = df_new_agg_views["time"].iloc[x+6].strftime("%Y-%m-%d")
+        else:
+            start_date = df_new_agg_views["time"].iloc[x].strftime("%Y-%m-%d")
+            end_date = df_new_agg_views["time"].iloc[len(df_new_agg_views) - 1].strftime("%Y-%m-%d")
+        MD_SUMMARY.write(
+                textwrap.dedent(
+                    f"""
+            |{start_date}|{end_date}|{round(df_new_agg_clones["clones_total"].iloc[x:x+7].mean(), 2)}|{round(df_new_agg_clones["clones_unique"].iloc[x:x+7].mean(), 2)}|{round(df_new_agg_views["views_total"].iloc[x:x+7].mean(), 2)}|{round(df_new_agg_views["views_unique"].iloc[x:x+7].mean(), 2)}|{cum_stars}|{cum_forks}|
+            """
+                ).rstrip()
+            )
+
+    with open(md_summary_filepath, "ab") as f:
+       f.write(MD_SUMMARY.getvalue().encode("utf-8"))
 
 
 def gen_date_axis_lim(dfs: Iterable[pd.DataFrame]) -> Tuple[str, str]:
@@ -1008,6 +1122,8 @@ def analyse_view_clones_ts_fragments() -> pd.DataFrame:
     # so that df.index is kept meaningful.
     df_agg_for_return = df_agg
     df_agg = df_agg.reset_index()
+    global df_agg_views
+    global df_agg_clones
     df_agg_views = df_agg.drop(columns=["clones_unique", "clones_total"])
     df_agg_clones = df_agg.drop(columns=["views_unique", "views_total"])
 
